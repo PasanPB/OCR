@@ -11,6 +11,11 @@ vectorizer = joblib.load("model/vectorizer.pkl")
 image = Image.open("test_bills/sample_bill.jpg")
 text = pytesseract.image_to_string(image)
 
+# Print the raw extracted text (useful for debugging)
+print("📝 Extracted Text from Bill:\n")
+print(text)
+print("\n----------------------------\n")
+
 # Extract item names and prices
 lines = text.split('\n')
 items = []
@@ -21,7 +26,11 @@ for line in lines:
         price = float(match.group(2))
         items.append((item, price))
 
-# Categorize
-for item, price in items:
-    category = model.predict(vectorizer.transform([item]))[0]
-    print(f"{item} - Rs.{price:.2f} → {category}")
+# If no items found
+if not items:
+    print("⚠️ No items with prices found. Check OCR accuracy or bill format.")
+else:
+    print("🧾 Detected Items and Predicted Categories:\n")
+    for item, price in items:
+        category = model.predict(vectorizer.transform([item]))[0]
+        print(f"{item} - Rs.{price:.2f} → {category}")
