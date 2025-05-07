@@ -4,126 +4,109 @@ import re
 import joblib
 import numpy as np
 
-# Configure Tesseract path if needed
-# pytesseract.pytesseract.tesseract_cmd = r'<full_path_to_tesseract_executable>'
-
-def preprocess_image(image_path):
-    """Enhance image for better OCR results"""
-    image = Image.open(image_path)
-    
-    # Convert to grayscale
-    image = image.convert('L')
-    
-    # Enhance contrast
-    enhancer = ImageEnhance.Contrast(image)
-    image = enhancer.enhance(2.0)
-    
-    # Enhance sharpness
-    enhancer = ImageEnhance.Sharpness(image)
-    image = enhancer.enhance(2.0)
-    
-    return image
-
-def extract_items(text):
-    """Improved item extraction with multiple patterns"""
-    items = []
-    patterns = [
-        r"^([^\d$]+?)\s+([$\-]?\s*\d+\.\d{2})\b",  # Standard item with price
-        r"^([^\d$]+?)\s+[xX*]\s*\d+\s+([$\-]?\s*\d+\.\d{2})",  # With quantity
-        r"^([^\d$]+?)\s+-\s+([$\-]?\s*\d+\.\d{2})",  # Dash separator
-        r"^([^\d$]+?)\s+@\s+\d+\.\d{2}\s+([$\-]?\s*\d+\.\d{2})",  # Unit pricing
-        r"^([^\d$]+?)\s+(\d+)\s+([$\-]?\s*\d+\.\d{2})"  # Item with count
-    ]
-    
-    for line in text.split('\n'):
-        line = line.strip()
-        if not line or any(skip in line.lower() for skip in ['subtotal', 'total', 'tax', 'tip', 'change']):
-            continue
-            
-        for pattern in patterns:
-            match = re.search(pattern, line)
-            if match:
-                try:
-                    item = match.group(1).strip()
-                    price = float(match.group(-1).replace('$', '').replace(' ', ''))
-                    items.append({'item': item, 'price': price, 'raw': line})
-                    break
-                except (ValueError, IndexError):
-                    continue
-    return items
-
-def scan_receipt(image_path):
-    """Complete receipt scanning pipeline"""
-    try:
-        # Load ML model
-        model = joblib.load("model/expense_classifier.pkl")
-        vectorizer = joblib.load("model/vectorizer.pkl")
-        
-        # Preprocess and OCR
-        image = preprocess_image(image_path)
-        custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ$.- '
-        text = pytesseract.image_to_string(image, config=custom_config)
-        
-        # Extract items
-        items = extract_items(text)
-        
-        if not items:
-            # Try alternative OCR approach if no items found
-            alt_config = r'--oem 3 --psm 11'
-            text = pytesseract.image_to_string(image, config=alt_config)
-            items = extract_items(text)
-            
-        # Classify items
-        results = []
-        for item in items:
-            cleaned = re.sub(r'[^a-zA-Z0-9\s]', '', item['item'].lower())
-            vec = vectorizer.transform([cleaned])
-            category = model.predict(vec)[0]
-            proba = model.predict_proba(vec).max()
-            results.append({
-                'item': item['item'],
-                'price': item['price'],
-                'category': category,
-                'confidence': f"{proba:.1%}",
-                'raw_text': item['raw']
-            })
-        
-        return {
-            'status': 'success',
-            'items': results,
-            'raw_text': text
-        }
-        
-    except Exception as e:
-        return {
-            'status': 'failed',
-            'error': str(e),
-            'items': [],
-            'raw_text': ''
+class RestaurantBillScanner:
+    def __init__(self):
+        self.model = joblib.load('restaurant_expense_classifier.pkl')
+        self.vectorizer = joblib.load('restaurant_vectorizer.pkl')
+        self.drink_keywords = {
+            'gin', 'tonic', 'mule', 'vodka', 'whiskey', 'rum', 
+            'wine', 'beer', 'martini', 'margarita', 'mojito'
         }
 
-# Example usage
+    def enhance_image(self, image_path):
+        """Specialized enhancement for receipt paper"""
+        img = Image.open(image_path)
+        img = img.convert('L')  # Grayscale
+        
+        # Boost low-contrast receipt text
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(3.0)
+        
+        # Sharpen faded text
+        enhancer = ImageEnhance.Sharpness(img)
+        return enhancer.enhance(2.5)
+
+    def extract_line_items(self, text):
+        """Specialized parser for restaurant bills"""
+        items = []
+        current_item = ""
+        
+        for line in text.split('\n'):
+            line = line.strip()
+            
+            # Price detection (supports $10.50 and 10.50 formats)
+            price_match = re.search(r'(\$?\s*\d+\.\d{2})\b', line)
+            
+            if price_match:
+                price = float(price_match.group(1).replace('$', ''))
+                item = current_item + " " + line[:price_match.start()].strip()
+                items.append({'item': item, 'price': price})
+                current_item = ""
+            else:
+                # Handle multi-line items (like "Hendrick Gin\n& Tonic")
+                if line and not any(line.lower().startswith(x) for x in ['sub', 'total', 'tax', 'balance']):
+                    current_item += " " + line if current_item else line
+        
+        return items
+
+    def classify_item(self, text):
+        """Enhanced classification for drinks"""
+        # Preprocess for alcohol detection
+        cleaned = re.sub(r'[^a-zA-Z\s]', '', text.lower())
+        
+        # Check for obvious drink keywords first
+        if any(keyword in cleaned for keyword in self.drink_keywords):
+            return 'Alcohol', 0.95  # High confidence
+            
+        # Use ML model for others
+        vec = self.vectorizer.transform([cleaned])
+        return self.model.predict(vec)[0], self.model.predict_proba(vec).max()
+
+    def process_bill(self, image_path):
+        """Complete processing pipeline"""
+        try:
+            # OCR with receipt-optimized settings
+            img = self.enhance_image(image_path)
+            text = pytesseract.image_to_string(img, config='--psm 4 --oem 3')
+            
+            # Extract items with prices
+            line_items = self.extract_line_items(text)
+            
+            # Classify each item
+            results = []
+            for item in line_items:
+                category, confidence = self.classify_item(item['item'])
+                results.append({
+                    'description': item['item'].strip(),
+                    'amount': item['price'],
+                    'category': category,
+                    'confidence': float(confidence)
+                })
+            
+            return {
+                'status': 'success',
+                'items': results,
+                'raw_text': text
+            }
+            
+        except Exception as e:
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+
+# Example Usage
 if __name__ == "__main__":
-    result = scan_receipt("test_bills/sample_bill.jpg")
+    scanner = RestaurantBillScanner()
+    result = scanner.process_bill("test_bills/sample_bill.jpg")
     
     if result['status'] == 'success':
-        print("✅ Receipt processed successfully!")
-        print("\n📝 Raw OCR Text:\n")
+        print("BILL ANALYSIS RESULTS:")
+        print("-" * 40)
+        for item in result['items']:
+            print(f"{item['description']: <30} ${item['amount']: >6.2f} → {item['category']} ({item['confidence']:.0%})")
+        print("\nRAW TEXT EXTRACTED:")
+        print("-" * 40)
         print(result['raw_text'])
-        
-        if result['items']:
-            print("\n🧾 Detected Items:")
-            for item in result['items']:
-                print(f"- {item['item']}: ${item['price']:.2f} ({item['category']}, {item['confidence']} confidence)")
-                print(f"  Raw: {item['raw_text']}")
-        else:
-            print("\n⚠️ No items found. Possible issues:")
-            print("1. Poor image quality")
-            print("2. Unsupported receipt format")
-            print("3. Items not in expected format")
-            print("\nTry:")
-            print("- Taking a clearer photo with even lighting")
-            print("- Cropping to just the items section")
-            print("- Checking the raw OCR output above for detection issues")
     else:
-        print(f"❌ Error processing receipt: {result['error']}")
+        print("Error:", result['message'])

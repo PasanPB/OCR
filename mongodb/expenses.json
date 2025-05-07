@@ -1,0 +1,12 @@
+{
+    "_id": "6489f1e2b3c4d5678e9f0123",
+    "restaurant": "Sample Restaurant",
+    "date": "2025-05-07",
+    "items": [
+      {"item": "Burger", "category": "Food", "price": 500},
+      {"item": "Cola", "category": "Drink", "price": 150}
+    ],
+    "total": 650,
+    "bill_id": 54892
+  }
+  
