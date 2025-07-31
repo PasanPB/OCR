@@ -1,112 +1,145 @@
-import pytesseract
-from PIL import Image, ImageEnhance
-import re
-import joblib
+import pandas as pd
 import numpy as np
+import re
+import json
+import cv2
+import pytesseract
+from PIL import Image
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import classification_report
+import os
 
-class RestaurantBillScanner:
-    def __init__(self):
-        self.model = joblib.load('restaurant_expense_classifier.pkl')
-        self.vectorizer = joblib.load('restaurant_vectorizer.pkl')
-        self.drink_keywords = {
-            'gin', 'tonic', 'mule', 'vodka', 'whiskey', 'rum', 
-            'wine', 'beer', 'martini', 'margarita', 'mojito'
-        }
+# Set Tesseract path (update if needed for your system)
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'  # Windows example
+# For Linux/Mac, comment out the above line or adjust as needed (e.g., /usr/bin/tesseract)
 
-    def enhance_image(self, image_path):
-        """Specialized enhancement for receipt paper"""
-        img = Image.open(image_path)
-        img = img.convert('L')  # Grayscale
-        
-        # Boost low-contrast receipt text
-        enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(3.0)
-        
-        # Sharpen faded text
-        enhancer = ImageEnhance.Sharpness(img)
-        return enhancer.enhance(2.5)
+def preprocess_image(image_path):
+    """Preprocess image for OCR."""
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise FileNotFoundError(f"Image not found: {image_path}")
+    # Apply thresholding to improve text readability
+    _, img = cv2.threshold(img, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Resize to improve OCR accuracy
+    img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    return img
 
-    def extract_line_items(self, text):
-        """Specialized parser for restaurant bills"""
-        items = []
-        current_item = ""
-        
-        for line in text.split('\n'):
-            line = line.strip()
-            
-            # Price detection (supports $10.50 and 10.50 formats)
-            price_match = re.search(r'(\$?\s*\d+\.\d{2})\b', line)
-            
-            if price_match:
-                price = float(price_match.group(1).replace('$', ''))
-                item = current_item + " " + line[:price_match.start()].strip()
-                items.append({'item': item, 'price': price})
-                current_item = ""
-            else:
-                # Handle multi-line items (like "Hendrick Gin\n& Tonic")
-                if line and not any(line.lower().startswith(x) for x in ['sub', 'total', 'tax', 'balance']):
-                    current_item += " " + line if current_item else line
-        
-        return items
+def extract_text_from_image(image_path):
+    """Extract text from an image using Tesseract OCR."""
+    try:
+        img = preprocess_image(image_path)
+        text = pytesseract.image_to_string(img, lang='eng')
+        # Clean extracted text
+        text = re.sub(r'\n\s*\n', '\n', text.strip())  # Remove extra newlines
+        text = re.sub(r'[^\w\s.,]', '', text)  # Remove special characters
+        return text
+    except Exception as e:
+        print(f"Error processing {image_path}: {e}")
+        return ""
 
-    def classify_item(self, text):
-        """Enhanced classification for drinks"""
-        # Preprocess for alcohol detection
-        cleaned = re.sub(r'[^a-zA-Z\s]', '', text.lower())
-        
-        # Check for obvious drink keywords first
-        if any(keyword in cleaned for keyword in self.drink_keywords):
-            return 'Alcohol', 0.95  # High confidence
-            
-        # Use ML model for others
-        vec = self.vectorizer.transform([cleaned])
-        return self.model.predict(vec)[0], self.model.predict_proba(vec).max()
+def clean_text(text):
+    """Clean text for ML processing."""
+    if not isinstance(text, str):
+        return ""
+    text = text.lower()
+    text = re.sub(r'[^\w\s]', '', text)  # Remove punctuation
+    text = re.sub(r'\d+', '', text)  # Remove numbers
+    return text.strip()
 
-    def process_bill(self, image_path):
-        """Complete processing pipeline"""
-        try:
-            # OCR with receipt-optimized settings
-            img = self.enhance_image(image_path)
-            text = pytesseract.image_to_string(img, config='--psm 4 --oem 3')
-            
-            # Extract items with prices
-            line_items = self.extract_line_items(text)
-            
-            # Classify each item
-            results = []
-            for item in line_items:
-                category, confidence = self.classify_item(item['item'])
-                results.append({
-                    'description': item['item'].strip(),
-                    'amount': item['price'],
-                    'category': category,
-                    'confidence': float(confidence)
-                })
-            
-            return {
-                'status': 'success',
-                'items': results,
-                'raw_text': text
-            }
-            
-        except Exception as e:
-            return {
-                'status': 'error',
-                'message': str(e)
-            }
-
-# Example Usage
-if __name__ == "__main__":
-    scanner = RestaurantBillScanner()
-    result = scanner.process_bill("test_bills/sample_bill.jpg")
-    
-    if result['status'] == 'success':
-        print("BILL ANALYSIS RESULTS:")
-        print("-" * 40)
-        for item in result['items']:
-            print(f"{item['description']: <30} ${item['amount']: >6.2f} → {item['category']} ({item['confidence']:.0%})")
-        print("\nRAW TEXT EXTRACTED:")
-        print("-" * 40)
-        print(result['raw_text'])
+def infer_expense_category(description):
+    """Infer expense category based on item description."""
+    if not isinstance(description, str):
+        return "Miscellaneous"
+    description = description.lower()
+    if any(keyword in description for keyword in ["wine", "glass", "bottle", "rack", "opener", "kitchen", "cider", "dining table"]):
+        return "Kitchenware"
+    elif any(keyword in description for keyword in ["dress", "shoe", "cleat", "clothing", "outfit", "romper"]):
+        return "Clothing"
+    elif any(keyword in description for keyword in ["console", "computer", "xbox", "playstation", "nintendo", "desktop", "laptop"]):
+        return "Electronics"
+    elif any(keyword in description for keyword in ["book", "ebook", "hardcover", "paperback"]):
+        return "Books"
+    elif any(keyword in description for keyword in ["table", "sofa", "rug", "carpet", "furniture"]):
+        return "Furniture"
     else:
-        print("Error:", result['message'])
+        return "Miscellaneous"
+
+# Load CSV data
+csv_path = "batch_1.csv"  # Your CSV file
+image_folder = "batch_1/"  # Your image folder
+df = pd.read_csv(csv_path)
+
+# Verify CSV columns
+expected_columns = ['File Name', 'Json Data', 'OCRed Text']
+if not all(col in df.columns for col in expected_columns):
+    raise ValueError(f"CSV must contain columns: {expected_columns}")
+
+# Extract item descriptions from Json Data
+def extract_descriptions(json_str):
+    try:
+        json_data = json.loads(json_str.replace('""', '"'))
+        items = json_data.get('items', [])
+        descriptions = [item.get('description', '') for item in items]
+        return ' '.join(descriptions)
+    except json.JSONDecodeError:
+        return ""
+
+df['Item Descriptions'] = df['Json Data'].apply(extract_descriptions)
+
+# Infer expense categories
+df['Expense Type'] = df['Item Descriptions'].apply(infer_expense_category)
+
+# Clean the OCRed text
+df['Cleaned Text'] = df['OCRed Text'].apply(clean_text)
+
+# Remove rows with empty text or invalid categories
+df = df[df['Cleaned Text'].str.strip() != '']
+df = df[df['Expense Type'] != '']
+if df.empty:
+    raise ValueError("No valid text data after cleaning. Check OCR output or CSV.")
+
+# Prepare data for ML
+X = df['Cleaned Text']
+y = df['Expense Type']
+
+# Split data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Create a pipeline with TF-IDF vectorizer and Random Forest classifier
+pipeline = Pipeline([
+    ('tfidf', TfidfVectorizer(max_features=5000, stop_words='english')),
+    ('classifier', RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced'))
+])
+
+# Train the model
+pipeline.fit(X_train, y_train)
+
+# Evaluate the model
+y_pred = pipeline.predict(X_test)
+print("Classification Report:")
+print(classification_report(y_test, y_pred))
+
+# Function to predict expense type for a new bill image
+def predict_expense_type(image_path):
+    """Predict expense type for a new bill image."""
+    text = extract_text_from_image(image_path)
+    cleaned_text = clean_text(text)
+    if not cleaned_text:
+        return "Error: No text extracted"
+    prediction = pipeline.predict([cleaned_text])[0]
+    return prediction
+
+# Example: Predict expense type for a new bill
+new_bill_path = os.path.join(image_folder, "batch1-0494.jpg")  # Example image
+if os.path.exists(new_bill_path):
+    predicted_category = predict_expense_type(new_bill_path)
+    print(f"Predicted Expense Type for {new_bill_path}: {predicted_category}")
+else:
+    print(f"New bill image not found: {new_bill_path}")
+
+# Save the model
+import joblib
+joblib.dump(pipeline, "expense_categorizer_model.pkl")
