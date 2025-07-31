@@ -1,0 +1,8 @@
+Category,Keywords
+Food,"food,grocery,bread,milk,cheese,meat,vegetable,fruit,cereal,snack,beverage,coffee,tea,chicken,rice,pizza,burger"
+Kitchenware,"wine,glass,bottle,rack,opener,kitchen,cider,dining table,plate,cutlery,pan,pot"
+Clothing,"dress,shoe,cleat,clothing,outfit,romper,shirt,pants,jacket,socks"
+Electronics,"console,computer,xbox,playstation,nintendo,desktop,laptop,phone,tablet,tv"
+Books,"book,ebook,hardcover,paperback,novel,textbook"
+Furniture,"table,sofa,rug,carpet,furniture,chair,bed,desk"
+Miscellaneous,none (default for unmatched descriptions)
